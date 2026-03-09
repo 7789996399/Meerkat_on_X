@@ -35,5 +35,21 @@ Lambda: approval_handler ──► X/Twitter API ──► Post published!
 - **API Gateway** — approval endpoint
 - **CloudWatch** — logs and monitoring
 
+## Meerkat Console Integration
+
+Each Lambda reports its activity to the Meerkat Console so the Orchestrator
+can see what this agent is doing. This is optional and non-blocking.
+
+Set these environment variables on each Lambda function (via AWS Console or deploy.sh):
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `MEERKAT_API_URL` | Meerkat API base URL | `https://api.meerkatplatform.com` |
+| `MEERKAT_AGENT_ID` | Agent ID from Console seed data | `agt_general_x_posting_agent_315a2a` |
+| `MEERKAT_API_KEY` | Org API key | `mk_live_*` |
+
+If any of these are missing, Console reporting is silently skipped and the
+Lambda functions work exactly as before.
+
 ## Setup
 See `infrastructure/deploy.sh` for step-by-step deployment.

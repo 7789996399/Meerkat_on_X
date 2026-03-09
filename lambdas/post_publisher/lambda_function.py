@@ -280,6 +280,18 @@ def lambda_handler(event, context):
         tweet_id = result.get("data", {}).get("id", "unknown")
         update_post_status(post_id, "PUBLISHED", tweet_id)
 
+        # Report successful publish to Meerkat Console
+        try:
+            import meerkat_console
+            meerkat_console.log_action("post_published", {
+                "post_id": post_id,
+                "tweet_id": tweet_id,
+                "content_preview": post["post_text"][:80],
+                "status": "PUBLISHED",
+            })
+        except Exception:
+            pass
+
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "text/html"},
@@ -295,6 +307,14 @@ def lambda_handler(event, context):
             # Mark as UNCERTAIN so we don't re-post on retry.
             update_post_status(post_id, "UNCERTAIN")
             print(f"X API returned {e.code} — tweet may have posted. Check X.")
+
+            try:
+                import meerkat_console
+                meerkat_console.send_alert("warning",
+                    f"X API returned {e.code} for post {post_id}. Tweet may be live. Marked UNCERTAIN.")
+            except Exception:
+                pass
+
             return {
                 "statusCode": 200,
                 "headers": {"Content-Type": "text/html"},
@@ -306,6 +326,14 @@ def lambda_handler(event, context):
             }
         update_post_status(post_id, "FAILED")
         print(f"Error posting to X: {e}")
+
+        try:
+            import meerkat_console
+            meerkat_console.send_alert("error",
+                f"Post {post_id} failed: HTTP {e.code}")
+        except Exception:
+            pass
+
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "text/html"},
@@ -314,6 +342,14 @@ def lambda_handler(event, context):
     except Exception as e:
         update_post_status(post_id, "FAILED")
         print(f"Error posting to X: {e}")
+
+        try:
+            import meerkat_console
+            meerkat_console.send_alert("error",
+                f"Post {post_id} failed: {str(e)[:200]}")
+        except Exception:
+            pass
+
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "text/html"},

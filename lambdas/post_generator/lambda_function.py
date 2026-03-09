@@ -208,6 +208,19 @@ def lambda_handler(event, context):
     except Exception as e:
         print(f"Error sending SMS: {e}")
 
+    # Report to Meerkat Console
+    try:
+        import meerkat_console
+        meerkat_console.log_action("post_drafted", {
+            "post_id": post_id,
+            "char_count": len(post_text),
+            "content_preview": post_text[:80],
+            "status": "DRAFT",
+            "news_items_used": len(news_items),
+        })
+    except Exception:
+        pass  # Console reporting is optional
+
     return {
         "statusCode": 200,
         "body": json.dumps({

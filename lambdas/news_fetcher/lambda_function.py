@@ -140,6 +140,13 @@ def lambda_handler(event, context):
     """Main Lambda entry point."""
     print("Meerkat News Fetcher starting...")
 
+    # Report heartbeat to Meerkat Console (runs 3x daily, doubles as keepalive)
+    try:
+        import meerkat_console
+        meerkat_console.send_heartbeat(status="active", metrics={"lambda": "news_fetcher"})
+    except Exception:
+        pass  # Console reporting is optional
+
     # Get API keys from Secrets Manager
     secrets = get_secret("meerkat-api-keys")
     newsapi_key = secrets.get("newsapi_key", "")
@@ -178,6 +185,19 @@ def lambda_handler(event, context):
         print(f"Triggered post generator with {len(new_items[:3])} items")
     else:
         print("No new items found. Meerkat is napping.")
+
+    # Report results to Meerkat Console
+    try:
+        import meerkat_console
+        sources = list(set(a["source"] for a in all_articles))
+        meerkat_console.log_action("news_fetched", {
+            "articles_found": len(all_articles),
+            "new_articles": len(new_items),
+            "sources": ", ".join(sources),
+            "triggered_generator": len(new_items) > 0,
+        })
+    except Exception:
+        pass  # Console reporting is optional
 
     return {
         "statusCode": 200,

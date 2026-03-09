@@ -178,9 +178,18 @@ sleep 10
 
 ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/meerkat-lambda-role"
 
+# --- Meerkat Console reporting (optional) ---
+# Each Lambda zip includes meerkat_console.py for Console integration.
+# Set these env vars in each Lambda to enable Console reporting:
+#   MEERKAT_API_URL   -- production: https://api.meerkatplatform.com
+#   MEERKAT_AGENT_ID  -- from Meerkat Console seed (e.g., agt_general_x_posting_agent_315a2a)
+#   MEERKAT_API_KEY   -- org API key (mk_live_*)
+# If not set, Console reporting is silently skipped.
+MEERKAT_CONSOLE_PY="../../meerkat_console.py"
+
 # --- News Fetcher ---
 cd lambdas/news_fetcher
-zip -j /tmp/news_fetcher.zip lambda_function.py
+zip -j /tmp/news_fetcher.zip lambda_function.py $MEERKAT_CONSOLE_PY
 aws lambda create-function \
   --function-name meerkat-news-fetcher \
   --runtime python3.12 \
@@ -195,7 +204,7 @@ cd ../..
 
 # --- Post Generator ---
 cd lambdas/post_generator
-zip -j /tmp/post_generator.zip lambda_function.py
+zip -j /tmp/post_generator.zip lambda_function.py $MEERKAT_CONSOLE_PY
 aws lambda create-function \
   --function-name meerkat-post-generator \
   --runtime python3.12 \
@@ -210,7 +219,7 @@ cd ../..
 
 # --- Post Publisher ---
 cd lambdas/post_publisher
-zip -j /tmp/post_publisher.zip lambda_function.py
+zip -j /tmp/post_publisher.zip lambda_function.py $MEERKAT_CONSOLE_PY
 aws lambda create-function \
   --function-name meerkat-post-publisher \
   --runtime python3.12 \
@@ -226,7 +235,7 @@ cd ../..
 # --- Reply Scanner ---
 # NOTE: Requires X API Basic plan ($100/mo) for tweet read access
 cd lambdas/reply_scanner
-zip -j /tmp/reply_scanner.zip lambda_function.py
+zip -j /tmp/reply_scanner.zip lambda_function.py $MEERKAT_CONSOLE_PY
 aws lambda create-function \
   --function-name meerkat-reply-scanner \
   --runtime python3.12 \

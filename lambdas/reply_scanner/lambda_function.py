@@ -448,4 +448,16 @@ def lambda_handler(event, context):
     }
     print(f"\nReply Scanner complete: {json.dumps(summary)}")
 
+    # Report results to Meerkat Console
+    try:
+        import meerkat_console
+        meerkat_console.log_action("replies_scanned", {
+            "tweets_scanned": tweets_scanned,
+            "tweets_relevant": tweets_relevant,
+            "replies_drafted": replies_generated,
+            "accounts_monitored": len(TARGET_ACCOUNTS),
+        })
+    except Exception:
+        pass  # Console reporting is optional
+
     return {"statusCode": 200, "body": json.dumps(summary)}
