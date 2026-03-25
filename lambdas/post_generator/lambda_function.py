@@ -1,7 +1,7 @@
 """
 Lambda 2: Post Generator
 Receives news items from the fetcher, sends them to Claude via Bedrock,
-saves draft posts to DynamoDB, and sends SMS for approval.
+saves draft posts to DynamoDB (X + LinkedIn versions), and sends SMS for approval.
 """
 
 import json
@@ -63,6 +63,34 @@ Voice rules:
 - No hashtags unless highly relevant.
 
 DO NOT: attack competitors, give medical/investment advice, use emojis, use em-dashes (—)."""
+
+# LinkedIn feature flag and prompt
+LINKEDIN_ENABLED = os.environ.get("LINKEDIN_ENABLED", "false").lower() == "true"
+
+LINKEDIN_SYSTEM_PROMPT = """You are writing a LinkedIn post for Jean Raubenheimer, MD,
+founder of Meerkat Labs Inc. Jean is a practicing anesthesiologist at Providence Health
+Care in Vancouver, building AI verification infrastructure for regulated industries.
+
+Tone: Professional thought leadership. Not corporate jargon. Authentic, direct,
+clinician-turned-founder perspective. Occasional personal insight from the OR or
+the startup trenches.
+
+Format:
+- Opening hook (1-2 lines that make people stop scrolling)
+- 3-5 short paragraphs of substance
+- 1-3 relevant hashtags at the end (max)
+- NEVER use emojis
+- NEVER use em-dashes. Use periods, commas, or line breaks instead.
+- 600-1200 characters total
+
+What Meerkat Labs does:
+- Real-time AI governance middleware for regulated industries
+- Dual-gate: ingress shield (prompt injection defense) + egress verification (hallucination detection)
+- Sub-2-second latency, full audit trail, purpose-built verification models
+- Product URL: meerkatplatform.com
+
+DO NOT: attack competitors, give medical/investment advice, use emojis, use em-dashes (—).
+DO NOT: use "excited to announce" or "thrilled to share" or any LinkedIn cliches."""
 
 
 def _twitter_length(text):
@@ -158,17 +186,60 @@ Respond with ONLY the post text, nothing else. No quotes, no explanation."""
     return post_text
 
 
-def save_draft(post_text, news_items):
+def generate_linkedin_post(news_items):
+    """Generate a LinkedIn post from the same news items."""
+    news_text = ""
+    for i, item in enumerate(news_items, 1):
+        news_text += f"\n{i}. [{item['source'].upper()}] {item['title']}\n"
+        news_text += f"   {item['description'][:300]}\n"
+        news_text += f"   URL: {item['url']}\n"
+
+    user_message = f"""Here are today's top AI governance news items:
+{news_text}
+
+Pick the MOST interesting item and write a LinkedIn post about it.
+Write as Jean Raubenheimer, a physician-founder building AI safety tools.
+Connect the news to real clinical or enterprise risks.
+Include the source URL for attribution.
+Do NOT use em-dashes anywhere.
+
+Respond with ONLY the post text, nothing else."""
+
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 1000,
+        "system": LINKEDIN_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": user_message}],
+    })
+
+    response = bedrock.invoke_model(
+        modelId=MODEL_ID,
+        contentType="application/json",
+        accept="application/json",
+        body=body.encode("utf-8"),
+    )
+
+    result = json.loads(response["body"].read())
+    post_text = result["content"][0]["text"].strip()
+
+    # Strip em-dashes
+    post_text = post_text.replace("\u2014", ",")
+
+    return post_text
+
+
+def save_draft(post_text, news_items, platform="x"):
     """Save the draft post to DynamoDB."""
     table = dynamodb.Table(POSTS_TABLE)
-    post_id = str(uuid.uuid4())[:8]  # Short ID for easy SMS approval
+    post_id = str(uuid.uuid4())[:8]
 
     item = {
         "post_id": post_id,
         "post_text": post_text,
+        "platform": platform,
         "status": "DRAFT",
         "char_count": len(post_text),
-        "source_news": json.dumps([{"title": item["title"], "url": item["url"]} for item in news_items]),
+        "source_news": json.dumps([{"title": it["title"], "url": it["url"]} for it in news_items]),
         "created_at": datetime.utcnow().isoformat(),
         "published_at": None,
     }
@@ -214,69 +285,102 @@ def lambda_handler(event, context):
         print(f"Error generating post: {e}")
         return {"statusCode": 500, "body": f"Generation error: {e}"}
 
-    # --- Verify the generated post through Meerkat before saving ---
-    trust_score = None
-    verify_passed = True
+    # Build source context for verification
+    source_context = "\n".join(
+        f"[{item['source'].upper()}] {item['title']}: {item['description'][:300]}"
+        for item in news_items
+    )
+
+    # --- Verify and save X post ---
+    x_trust = None
+    x_passed = True
     if _agent:
         try:
-            source_context = "\n".join(
-                f"[{item['source'].upper()}] {item['title']}: {item['description'][:300]}"
-                for item in news_items
-            )
-            result = _agent.verify(
-                output=post_text,
-                context=source_context,
-            )
-            trust_score = result.trust_score
-            verify_passed = result.passed
-            print(f"Meerkat verify: trust_score={trust_score}, passed={verify_passed}")
-
-            if not verify_passed:
-                _agent.alert(
-                    f"Post held: trust score {trust_score}",
-                    severity="warning",
-                    details={
-                        "content_preview": post_text[:100],
-                        "trust_score": trust_score,
-                    },
-                )
+            result = _agent.verify(output=post_text, context=source_context)
+            x_trust = result.trust_score
+            x_passed = result.passed
+            print(f"X verify: trust={x_trust}, passed={x_passed}")
+            if not x_passed:
+                _agent.alert(f"X post held: trust score {x_trust}", severity="warning")
         except Exception as e:
-            print(f"Meerkat verify error (non-blocking): {e}")
+            print(f"X verify error (non-blocking): {e}")
 
-    # Save draft to DynamoDB
-    post_id = save_draft(post_text, news_items)
-    print(f"Saved draft with ID: {post_id}")
+    x_post_id = save_draft(post_text, news_items, platform="x")
+    print(f"X draft saved: {x_post_id}")
 
-    # Send SMS for approval (skip if verification failed)
-    if verify_passed:
+    if x_passed:
         try:
-            send_approval_sms(post_id, post_text)
+            send_approval_sms(x_post_id, post_text)
         except Exception as e:
-            print(f"Error sending SMS: {e}")
-    else:
-        print(f"Post {post_id} held by Meerkat verification (trust={trust_score}). No SMS sent.")
+            print(f"Error sending SMS for X: {e}")
 
-    # Report to Meerkat SDK
     if _agent:
         try:
-            _agent.log_action("post_drafted", {
-                "post_id": post_id,
+            _agent.log_action("x_post_drafted", {
+                "post_id": x_post_id,
+                "platform": "x",
                 "char_count": len(post_text),
                 "content_preview": post_text[:80],
-                "status": "HELD" if not verify_passed else "DRAFT",
-                "trust_score": trust_score,
-                "news_items_used": len(news_items),
+                "status": "HELD" if not x_passed else "DRAFT",
+                "trust_score": x_trust,
             })
         except Exception:
             pass
 
+    # --- Generate, verify, and save LinkedIn post ---
+    li_post_id = None
+    li_trust = None
+    li_text = None
+    if LINKEDIN_ENABLED:
+        try:
+            li_text = generate_linkedin_post(news_items)
+            print(f"LinkedIn post ({len(li_text)} chars): {li_text[:100]}...")
+
+            li_passed = True
+            if _agent:
+                try:
+                    result = _agent.verify(output=li_text, context=source_context)
+                    li_trust = result.trust_score
+                    li_passed = result.passed
+                    print(f"LinkedIn verify: trust={li_trust}, passed={li_passed}")
+                    if not li_passed:
+                        _agent.alert(f"LinkedIn post held: trust score {li_trust}", severity="warning")
+                except Exception as e:
+                    print(f"LinkedIn verify error (non-blocking): {e}")
+
+            li_post_id = save_draft(li_text, news_items, platform="linkedin")
+            print(f"LinkedIn draft saved: {li_post_id}")
+
+            if li_passed:
+                try:
+                    send_approval_sms(li_post_id, f"[LINKEDIN] {li_text[:200]}")
+                except Exception as e:
+                    print(f"Error sending SMS for LinkedIn: {e}")
+
+            if _agent:
+                try:
+                    _agent.log_action("linkedin_post_drafted", {
+                        "post_id": li_post_id,
+                        "platform": "linkedin",
+                        "char_count": len(li_text),
+                        "content_preview": li_text[:80],
+                        "status": "HELD" if not li_passed else "DRAFT",
+                        "trust_score": li_trust,
+                    })
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"LinkedIn generation error (non-blocking): {e}")
+
     return {
         "statusCode": 200,
         "body": json.dumps({
-            "post_id": post_id,
-            "post_text": post_text,
-            "char_count": len(post_text),
-            "trust_score": trust_score,
-            "status": "HELD - failed verification" if not verify_passed else "DRAFT - awaiting approval",
+            "x_post_id": x_post_id,
+            "x_post_text": post_text,
+            "x_trust_score": x_trust,
+            "x_status": "HELD" if not x_passed else "DRAFT",
+            "linkedin_post_id": li_post_id,
+            "linkedin_trust_score": li_trust,
+            "linkedin_enabled": LINKEDIN_ENABLED,
         }),
     }

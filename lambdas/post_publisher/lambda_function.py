@@ -38,12 +38,53 @@ secrets_client = boto3.client("secretsmanager")
 
 # Environment variables
 POSTS_TABLE = os.environ.get("POSTS_TABLE", "meerkat-posts")
+LINKEDIN_ENABLED = os.environ.get("LINKEDIN_ENABLED", "false").lower() == "true"
+LINKEDIN_ACCESS_TOKEN = os.environ.get("LINKEDIN_ACCESS_TOKEN", "")
+LINKEDIN_AUTHOR_URN = os.environ.get("LINKEDIN_AUTHOR_URN", "")
 
 
 def get_secret(secret_name):
     """Fetch secrets from AWS Secrets Manager."""
     response = secrets_client.get_secret_value(SecretId=secret_name)
     return json.loads(response["SecretString"])
+
+
+def post_to_linkedin(text):
+    """Publish a post to LinkedIn personal profile via Share API.
+
+    Uses OAuth 2.0 Bearer token. Returns the API response dict.
+    """
+    if not LINKEDIN_ACCESS_TOKEN or not LINKEDIN_AUTHOR_URN:
+        raise RuntimeError("LinkedIn credentials not configured")
+
+    url = "https://api.linkedin.com/v2/ugcPosts"
+    payload = json.dumps({
+        "author": LINKEDIN_AUTHOR_URN,
+        "lifecycleState": "PUBLISHED",
+        "specificContent": {
+            "com.linkedin.ugc.ShareContent": {
+                "shareCommentary": {"text": text},
+                "shareMediaCategory": "NONE",
+            }
+        },
+        "visibility": {
+            "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
+        },
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {LINKEDIN_ACCESS_TOKEN}",
+            "Content-Type": "application/json",
+            "X-Restli-Protocol-Version": "2.0.0",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
 
 
 def create_oauth_signature(method, url, params, consumer_secret, token_secret):
@@ -290,33 +331,68 @@ def lambda_handler(event, context):
         }
 
     # Approve and publish
+    platform = post.get("platform", "x")
+
     try:
-        secrets = get_secret("meerkat-api-keys")
-        result = post_to_x(post["post_text"], secrets)
-        tweet_id = result.get("data", {}).get("id", "unknown")
-        update_post_status(post_id, "PUBLISHED", tweet_id)
+        if platform == "linkedin":
+            # Publish to LinkedIn
+            if not LINKEDIN_ENABLED:
+                return {
+                    "statusCode": 400,
+                    "headers": {"Content-Type": "text/html"},
+                    "body": "<h1>LinkedIn publishing is not enabled</h1><p>Set LINKEDIN_ENABLED=true with valid credentials.</p>",
+                }
+            result = post_to_linkedin(post["post_text"])
+            li_id = result.get("id", "unknown")
+            update_post_status(post_id, "PUBLISHED")
 
-        # Report successful publish to Meerkat
-        if _agent:
-            try:
-                _agent.log_action("post_published", {
-                    "post_id": post_id,
-                    "tweet_id": tweet_id,
-                    "content_preview": post["post_text"][:80],
-                    "status": "PUBLISHED",
-                })
-            except Exception:
-                pass
+            if _agent:
+                try:
+                    _agent.log_action("linkedin_post_published", {
+                        "post_id": post_id,
+                        "linkedin_id": li_id,
+                        "platform": "linkedin",
+                        "content_preview": post["post_text"][:80],
+                    })
+                except Exception:
+                    pass
 
-        return {
-            "statusCode": 200,
-            "headers": {"Content-Type": "text/html"},
-            "body": (
-                f"<h1>Posted! The meerkat has spoken.</h1>"
-                f"<p>{post['post_text']}</p>"
-                f"<p>Tweet ID: {tweet_id}</p>"
-            ),
-        }
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "text/html"},
+                "body": (
+                    f"<h1>Posted to LinkedIn! The meerkat has spoken.</h1>"
+                    f"<p>{post['post_text'][:300]}</p>"
+                    f"<p>LinkedIn Post ID: {li_id}</p>"
+                ),
+            }
+        else:
+            # Publish to X (existing flow)
+            secrets = get_secret("meerkat-api-keys")
+            result = post_to_x(post["post_text"], secrets)
+            tweet_id = result.get("data", {}).get("id", "unknown")
+            update_post_status(post_id, "PUBLISHED", tweet_id)
+
+            if _agent:
+                try:
+                    _agent.log_action("x_post_published", {
+                        "post_id": post_id,
+                        "tweet_id": tweet_id,
+                        "platform": "x",
+                        "content_preview": post["post_text"][:80],
+                    })
+                except Exception:
+                    pass
+
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "text/html"},
+                "body": (
+                    f"<h1>Posted to X! The meerkat has spoken.</h1>"
+                    f"<p>{post['post_text']}</p>"
+                    f"<p>Tweet ID: {tweet_id}</p>"
+                ),
+            }
     except urllib.error.HTTPError as e:
         if e.code >= 500:
             # 5xx from X — tweet may have actually posted despite the error.
