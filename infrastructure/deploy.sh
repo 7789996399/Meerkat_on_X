@@ -178,18 +178,40 @@ sleep 10
 
 ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/meerkat-lambda-role"
 
-# --- Meerkat Console reporting (optional) ---
-# Each Lambda zip includes meerkat_console.py for Console integration.
-# Set these env vars in each Lambda to enable Console reporting:
+# --- Meerkat SDK integration ---
+# Each Lambda zip includes the vendored meerkat_sdk/ package.
+# Set these env vars in each Lambda to enable SDK integration:
 #   MEERKAT_API_URL   -- production: https://api.meerkatplatform.com
-#   MEERKAT_AGENT_ID  -- from Meerkat Console seed (e.g., agt_general_x_posting_agent_315a2a)
+#   MEERKAT_AGENT_ID  -- from Meerkat agent registry
 #   MEERKAT_API_KEY   -- org API key (mk_live_*)
-# If not set, Console reporting is silently skipped.
-MEERKAT_CONSOLE_PY="../../meerkat_console.py"
+# If not set, SDK calls are silently skipped.
+# --- Meerkat SDK integration ---
+# Each Lambda zip includes the vendored meerkat_sdk/ package + requests.
+# Set these env vars in each Lambda to enable SDK integration:
+#   MEERKAT_API_URL   -- production: https://api.meerkatplatform.com
+#   MEERKAT_AGENT_ID  -- from Meerkat agent registry
+#   MEERKAT_API_KEY   -- org API key (mk_live_*)
+# If not set, SDK calls are silently skipped.
+
+# Install requests into a temp directory for bundling with Lambda zips
+rm -rf /tmp/meerkat-deps
+pip install -t /tmp/meerkat-deps requests -q 2>/dev/null
+
+# Helper: build a Lambda zip with the SDK and requests included
+build_lambda_zip() {
+  local lambda_dir=$1
+  local zip_name=$2
+  rm -f /tmp/${zip_name}.zip
+  # Lambda handler
+  zip -j /tmp/${zip_name}.zip lambdas/${lambda_dir}/lambda_function.py
+  # Vendored SDK
+  zip -r /tmp/${zip_name}.zip meerkat_sdk/ -x '*__pycache__*' -q
+  # requests + dependencies
+  cd /tmp/meerkat-deps && zip -r /tmp/${zip_name}.zip . -x '__pycache__/*' '*.dist-info/*' -q && cd -
+}
 
 # --- News Fetcher ---
-cd lambdas/news_fetcher
-zip -j /tmp/news_fetcher.zip lambda_function.py $MEERKAT_CONSOLE_PY
+build_lambda_zip news_fetcher news_fetcher
 aws lambda create-function \
   --function-name meerkat-news-fetcher \
   --runtime python3.12 \
@@ -200,11 +222,9 @@ aws lambda create-function \
   --memory-size 256 \
   --environment "Variables={NEWS_TABLE=meerkat-news,GENERATOR_FUNCTION=meerkat-post-generator}" \
   --region $REGION
-cd ../..
 
 # --- Post Generator ---
-cd lambdas/post_generator
-zip -j /tmp/post_generator.zip lambda_function.py $MEERKAT_CONSOLE_PY
+build_lambda_zip post_generator post_generator
 aws lambda create-function \
   --function-name meerkat-post-generator \
   --runtime python3.12 \
@@ -215,11 +235,9 @@ aws lambda create-function \
   --memory-size 256 \
   --environment "Variables={POSTS_TABLE=meerkat-posts,MODEL_ID=us.anthropic.claude-3-5-sonnet-20241022-v2:0,SNS_TOPIC_ARN=${SNS_TOPIC_ARN},APPROVAL_URL=WILL_UPDATE_AFTER_API_GATEWAY}" \
   --region $REGION
-cd ../..
 
 # --- Post Publisher ---
-cd lambdas/post_publisher
-zip -j /tmp/post_publisher.zip lambda_function.py $MEERKAT_CONSOLE_PY
+build_lambda_zip post_publisher post_publisher
 aws lambda create-function \
   --function-name meerkat-post-publisher \
   --runtime python3.12 \
@@ -230,12 +248,10 @@ aws lambda create-function \
   --memory-size 256 \
   --environment "Variables={POSTS_TABLE=meerkat-posts}" \
   --region $REGION
-cd ../..
 
 # --- Reply Scanner ---
 # NOTE: Requires X API Basic plan ($100/mo) for tweet read access
-cd lambdas/reply_scanner
-zip -j /tmp/reply_scanner.zip lambda_function.py $MEERKAT_CONSOLE_PY
+build_lambda_zip reply_scanner reply_scanner
 aws lambda create-function \
   --function-name meerkat-reply-scanner \
   --runtime python3.12 \
@@ -246,7 +262,6 @@ aws lambda create-function \
   --memory-size 256 \
   --environment "Variables={REPLIES_TABLE=meerkat-replies,MODEL_ID=us.anthropic.claude-3-5-sonnet-20241022-v2:0,SNS_TOPIC_ARN=${SNS_TOPIC_ARN},APPROVAL_URL=WILL_UPDATE_AFTER_API_GATEWAY,TARGET_ACCOUNTS=AnthropicAI\,OpenAI\,GoogleDeepMind\,MetaAI\,MistralAI\,ai_risks\,AISafetyInst\,FLI_org\,GaryMarcus\,DarioAmodei,LOOKBACK_MINUTES=90,MAX_REPLIES_PER_RUN=3}" \
   --region $REGION
-cd ../..
 
 echo "✅ Step 5 done: Lambda functions deployed"
 

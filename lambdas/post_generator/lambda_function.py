@@ -7,9 +7,25 @@ saves draft posts to DynamoDB, and sends SMS for approval.
 import json
 import os
 import re
+import sys
 import boto3
 import uuid
 from datetime import datetime
+
+# Add project root to path for vendored SDK
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+try:
+    from meerkat_sdk import MeerkatAgent
+    _agent = MeerkatAgent(
+        api_key=os.environ.get("MEERKAT_API_KEY", ""),
+        agent_id=os.environ.get("MEERKAT_AGENT_ID", ""),
+        name="X Posting Agent",
+        domain="social",
+        base_url=os.environ.get("MEERKAT_API_URL", "https://api.meerkatplatform.com"),
+        auto_heartbeat=False,
+    ) if os.environ.get("MEERKAT_API_KEY") and os.environ.get("MEERKAT_AGENT_ID") else None
+except Exception:
+    _agent = None
 
 # AWS clients
 dynamodb = boto3.resource("dynamodb")
@@ -198,28 +214,61 @@ def lambda_handler(event, context):
         print(f"Error generating post: {e}")
         return {"statusCode": 500, "body": f"Generation error: {e}"}
 
+    # --- Verify the generated post through Meerkat before saving ---
+    trust_score = None
+    verify_passed = True
+    if _agent:
+        try:
+            source_context = "\n".join(
+                f"[{item['source'].upper()}] {item['title']}: {item['description'][:300]}"
+                for item in news_items
+            )
+            result = _agent.verify(
+                output=post_text,
+                context=source_context,
+            )
+            trust_score = result.trust_score
+            verify_passed = result.passed
+            print(f"Meerkat verify: trust_score={trust_score}, passed={verify_passed}")
+
+            if not verify_passed:
+                _agent.alert(
+                    f"Post held: trust score {trust_score}",
+                    severity="warning",
+                    details={
+                        "content_preview": post_text[:100],
+                        "trust_score": trust_score,
+                    },
+                )
+        except Exception as e:
+            print(f"Meerkat verify error (non-blocking): {e}")
+
     # Save draft to DynamoDB
     post_id = save_draft(post_text, news_items)
     print(f"Saved draft with ID: {post_id}")
 
-    # Send SMS for approval
-    try:
-        send_approval_sms(post_id, post_text)
-    except Exception as e:
-        print(f"Error sending SMS: {e}")
+    # Send SMS for approval (skip if verification failed)
+    if verify_passed:
+        try:
+            send_approval_sms(post_id, post_text)
+        except Exception as e:
+            print(f"Error sending SMS: {e}")
+    else:
+        print(f"Post {post_id} held by Meerkat verification (trust={trust_score}). No SMS sent.")
 
-    # Report to Meerkat Console
-    try:
-        import meerkat_console
-        meerkat_console.log_action("post_drafted", {
-            "post_id": post_id,
-            "char_count": len(post_text),
-            "content_preview": post_text[:80],
-            "status": "DRAFT",
-            "news_items_used": len(news_items),
-        })
-    except Exception:
-        pass  # Console reporting is optional
+    # Report to Meerkat SDK
+    if _agent:
+        try:
+            _agent.log_action("post_drafted", {
+                "post_id": post_id,
+                "char_count": len(post_text),
+                "content_preview": post_text[:80],
+                "status": "HELD" if not verify_passed else "DRAFT",
+                "trust_score": trust_score,
+                "news_items_used": len(news_items),
+            })
+        except Exception:
+            pass
 
     return {
         "statusCode": 200,
@@ -227,6 +276,7 @@ def lambda_handler(event, context):
             "post_id": post_id,
             "post_text": post_text,
             "char_count": len(post_text),
-            "status": "DRAFT - awaiting approval",
+            "trust_score": trust_score,
+            "status": "HELD - failed verification" if not verify_passed else "DRAFT - awaiting approval",
         }),
     }

@@ -10,6 +10,7 @@ read access (GET /2/users/:id/tweets). Free tier only allows posting.
 
 import json
 import os
+import sys
 import re
 import boto3
 import hashlib
@@ -20,6 +21,21 @@ import urllib.parse
 import uuid
 import base64
 from datetime import datetime, timedelta
+
+# Add project root to path for vendored SDK
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+try:
+    from meerkat_sdk import MeerkatAgent
+    _agent = MeerkatAgent(
+        api_key=os.environ.get("MEERKAT_API_KEY", ""),
+        agent_id=os.environ.get("MEERKAT_AGENT_ID", ""),
+        name="X Posting Agent",
+        domain="social",
+        base_url=os.environ.get("MEERKAT_API_URL", "https://api.meerkatplatform.com"),
+        auto_heartbeat=False,
+    ) if os.environ.get("MEERKAT_API_KEY") and os.environ.get("MEERKAT_AGENT_ID") else None
+except Exception:
+    _agent = None
 
 # AWS clients
 dynamodb = boto3.resource("dynamodb")
@@ -448,16 +464,16 @@ def lambda_handler(event, context):
     }
     print(f"\nReply Scanner complete: {json.dumps(summary)}")
 
-    # Report results to Meerkat Console
-    try:
-        import meerkat_console
-        meerkat_console.log_action("replies_scanned", {
-            "tweets_scanned": tweets_scanned,
-            "tweets_relevant": tweets_relevant,
-            "replies_drafted": replies_generated,
-            "accounts_monitored": len(TARGET_ACCOUNTS),
-        })
-    except Exception:
-        pass  # Console reporting is optional
+    # Report results to Meerkat
+    if _agent:
+        try:
+            _agent.log_action("replies_scanned", {
+                "tweets_scanned": tweets_scanned,
+                "tweets_relevant": tweets_relevant,
+                "replies_drafted": replies_generated,
+                "accounts_monitored": len(TARGET_ACCOUNTS),
+            })
+        except Exception:
+            pass
 
     return {"statusCode": 200, "body": json.dumps(summary)}

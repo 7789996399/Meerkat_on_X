@@ -6,6 +6,7 @@ Uses OAuth 1.0a to authenticate with X API v2.
 
 import json
 import os
+import sys
 import boto3
 import hashlib
 import hmac
@@ -15,6 +16,21 @@ import urllib.parse
 import urllib.error
 import uuid
 from datetime import datetime
+
+# Add project root to path for vendored SDK
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+try:
+    from meerkat_sdk import MeerkatAgent
+    _agent = MeerkatAgent(
+        api_key=os.environ.get("MEERKAT_API_KEY", ""),
+        agent_id=os.environ.get("MEERKAT_AGENT_ID", ""),
+        name="X Posting Agent",
+        domain="social",
+        base_url=os.environ.get("MEERKAT_API_URL", "https://api.meerkatplatform.com"),
+        auto_heartbeat=False,
+    ) if os.environ.get("MEERKAT_API_KEY") and os.environ.get("MEERKAT_AGENT_ID") else None
+except Exception:
+    _agent = None
 
 # AWS clients
 dynamodb = boto3.resource("dynamodb")
@@ -280,17 +296,17 @@ def lambda_handler(event, context):
         tweet_id = result.get("data", {}).get("id", "unknown")
         update_post_status(post_id, "PUBLISHED", tweet_id)
 
-        # Report successful publish to Meerkat Console
-        try:
-            import meerkat_console
-            meerkat_console.log_action("post_published", {
-                "post_id": post_id,
-                "tweet_id": tweet_id,
-                "content_preview": post["post_text"][:80],
-                "status": "PUBLISHED",
-            })
-        except Exception:
-            pass
+        # Report successful publish to Meerkat
+        if _agent:
+            try:
+                _agent.log_action("post_published", {
+                    "post_id": post_id,
+                    "tweet_id": tweet_id,
+                    "content_preview": post["post_text"][:80],
+                    "status": "PUBLISHED",
+                })
+            except Exception:
+                pass
 
         return {
             "statusCode": 200,
@@ -308,12 +324,14 @@ def lambda_handler(event, context):
             update_post_status(post_id, "UNCERTAIN")
             print(f"X API returned {e.code} — tweet may have posted. Check X.")
 
-            try:
-                import meerkat_console
-                meerkat_console.send_alert("warning",
-                    f"X API returned {e.code} for post {post_id}. Tweet may be live. Marked UNCERTAIN.")
-            except Exception:
-                pass
+            if _agent:
+                try:
+                    _agent.alert(
+                        f"X API returned {e.code} for post {post_id}. Tweet may be live. Marked UNCERTAIN.",
+                        severity="warning",
+                    )
+                except Exception:
+                    pass
 
             return {
                 "statusCode": 200,
@@ -327,12 +345,11 @@ def lambda_handler(event, context):
         update_post_status(post_id, "FAILED")
         print(f"Error posting to X: {e}")
 
-        try:
-            import meerkat_console
-            meerkat_console.send_alert("error",
-                f"Post {post_id} failed: HTTP {e.code}")
-        except Exception:
-            pass
+        if _agent:
+            try:
+                _agent.alert(f"Post {post_id} failed: HTTP {e.code}", severity="error")
+            except Exception:
+                pass
 
         return {
             "statusCode": 500,
@@ -343,12 +360,11 @@ def lambda_handler(event, context):
         update_post_status(post_id, "FAILED")
         print(f"Error posting to X: {e}")
 
-        try:
-            import meerkat_console
-            meerkat_console.send_alert("error",
-                f"Post {post_id} failed: {str(e)[:200]}")
-        except Exception:
-            pass
+        if _agent:
+            try:
+                _agent.alert(f"Post {post_id} failed: {str(e)[:200]}", severity="error")
+            except Exception:
+                pass
 
         return {
             "statusCode": 500,

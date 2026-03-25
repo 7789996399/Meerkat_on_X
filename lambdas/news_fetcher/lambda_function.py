@@ -6,10 +6,26 @@ Saves raw news items to DynamoDB, then triggers the post generator.
 
 import json
 import os
+import sys
 import boto3
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
+
+# Add project root to path for vendored SDK
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+try:
+    from meerkat_sdk import MeerkatAgent
+    _agent = MeerkatAgent(
+        api_key=os.environ.get("MEERKAT_API_KEY", ""),
+        agent_id=os.environ.get("MEERKAT_AGENT_ID", ""),
+        name="X Posting Agent",
+        domain="social",
+        base_url=os.environ.get("MEERKAT_API_URL", "https://api.meerkatplatform.com"),
+        auto_heartbeat=False,
+    ) if os.environ.get("MEERKAT_API_KEY") and os.environ.get("MEERKAT_AGENT_ID") else None
+except Exception:
+    _agent = None
 
 # AWS clients
 dynamodb = boto3.resource("dynamodb")
@@ -140,12 +156,19 @@ def lambda_handler(event, context):
     """Main Lambda entry point."""
     print("Meerkat News Fetcher starting...")
 
-    # Report heartbeat to Meerkat Console (runs 3x daily, doubles as keepalive)
-    try:
-        import meerkat_console
-        meerkat_console.send_heartbeat(status="active", metrics={"lambda": "news_fetcher"})
-    except Exception:
-        pass  # Console reporting is optional
+    # Send heartbeat and check for delegations (runs 3x daily)
+    if _agent:
+        try:
+            _agent.heartbeat(status="active", metadata={"lambda": "news_fetcher"})
+        except Exception:
+            pass
+        try:
+            delegations = _agent.poll_delegations()
+            for task in delegations:
+                _agent.log_action("delegation_received", task)
+                print(f"Delegation received: {task}")
+        except Exception:
+            pass
 
     # Get API keys from Secrets Manager
     secrets = get_secret("meerkat-api-keys")
@@ -186,18 +209,18 @@ def lambda_handler(event, context):
     else:
         print("No new items found. Meerkat is napping.")
 
-    # Report results to Meerkat Console
-    try:
-        import meerkat_console
-        sources = list(set(a["source"] for a in all_articles))
-        meerkat_console.log_action("news_fetched", {
-            "articles_found": len(all_articles),
-            "new_articles": len(new_items),
-            "sources": ", ".join(sources),
-            "triggered_generator": len(new_items) > 0,
-        })
-    except Exception:
-        pass  # Console reporting is optional
+    # Report results to Meerkat
+    if _agent:
+        try:
+            sources = list(set(a["source"] for a in all_articles))
+            _agent.log_action("news_fetched", {
+                "articles_found": len(all_articles),
+                "new_articles": len(new_items),
+                "sources": ", ".join(sources),
+                "triggered_generator": len(new_items) > 0,
+            })
+        except Exception:
+            pass
 
     return {
         "statusCode": 200,
